@@ -83,7 +83,7 @@ func NewJobQueueWorker(bootstrapServers string, groupId string, topicName string
 		"auto.offset.reset":    "earliest",
 		"client.id":            appName,
 		"enable.auto.commit":   false,
-		"max.poll.interval.ms": maxPermitedJobProcessing.Milliseconds(),
+		"max.poll.interval.ms": int(maxPermitedJobProcessing.Milliseconds()),
 	})
 	if err != nil {
 		panic(err)
@@ -124,14 +124,20 @@ func (w *JobQueueWorker) Run(c chan<- Job, confirmationChannel <-chan int, stopC
 				fmt.Printf("Consumer error: %v (%v)\n", err, job)
 			}
 			if job != nil {
-				fmt.Printf("Got job key %v (partition %v; %v)\n", message.Key, message.TopicPartition, message.Timestamp)
+				keyStr := string(message.Key[:])
+				fmt.Printf("Got job key %v (partition %v; %v)\n", keyStr, message.TopicPartition, message.Timestamp)
 				c <- job
 				<-confirmationChannel
 				w.client.CommitMessage(message)
-				fmt.Printf("Comitted processing of %v (partition %v; %v)\n", message.Key, message.TopicPartition, message.Timestamp)
+				fmt.Printf("Comitted processing of %v (partition %v; %v)\n", keyStr, message.TopicPartition, message.Timestamp)
 			}
 		}
 	}
+}
+
+func (w *JobQueueWorker) Close() {
+	fmt.Println("Closing worker")
+	w.client.Close()
 }
 
 type JobQueueProducer struct {
@@ -180,4 +186,9 @@ func (p *JobQueueProducer) Enqueue(jobKey string, jobBody []byte) {
 	}
 
 	fmt.Printf("job \"%s\"  submitted successfully", jobKey)
+}
+
+func (p *JobQueueProducer) Close() {
+	fmt.Println("Closing producer")
+	p.client.Close()
 }

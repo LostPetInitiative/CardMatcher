@@ -2,33 +2,31 @@ package main
 
 import (
 	"fmt"
+	"os"
 
-	"github.com/confluentinc/confluent-kafka-go/kafka"
+	"github.com/LostPetInitiative/CardMatcher/kafkajobs"
 )
 
 func main() {
-
-	c, err := kafka.NewConsumer(&kafka.ConfigMap{
-		"bootstrap.servers": "localhost",
-		"group.id":          "myGroup",
-		"auto.offset.reset": "earliest",
-	})
-
-	if err != nil {
-		panic(err)
+	kafkaBootstrapServers, ok := os.LookupEnv("KAFKA_URL")
+	if !ok {
+		fmt.Println("KAFKA_URL env var is not set")
+		os.Exit(1)
 	}
 
-	c.SubscribeTopics([]string{"myTopic", "^aRegex.*[Tt]opic"}, nil)
-
-	for {
-		msg, err := c.ReadMessage(-1)
-		if err == nil {
-			fmt.Printf("Message on %s: %s\n", msg.TopicPartition, string(msg.Value))
-		} else {
-			// The client will automatically try to recover from all errors.
-			fmt.Printf("Consumer error: %v (%v)\n", err, msg)
-		}
+	inputTopic, ok := os.LookupEnv("INPUT_QUEUE")
+	if !ok {
+		fmt.Println("INPUT_QUEUE env var is not set")
+		os.Exit(1)
 	}
 
-	c.Close()
+	outputTopic, ok := os.LookupEnv("OUTPUT_QUEUE")
+	if !ok {
+		fmt.Println("OUTPUT_QUEUE env var is not set")
+		os.Exit(1)
+	}
+
+	kafkajobs.EnsureTopicExists(kafkaBootstrapServers, inputTopic, 0, 0, 0)
+	kafkajobs.EnsureTopicExists(kafkaBootstrapServers, outputTopic, 0, 0, 0)
+	fmt.Println("Done")
 }

@@ -10,9 +10,11 @@ import (
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
+const appName = "CardMatcher"
+
 type Job = []byte
 
-type Worker struct {
+type JobQueueWorker struct {
 	client *kafka.Consumer
 }
 
@@ -57,7 +59,7 @@ func EnsureTopicExists(bootstrapServers string, topicName string, numPartitions 
 	topicConfig := make(map[string]string)
 	topicConfig["retention.ms"] = fmt.Sprintf("%d", retentionHours*60*60*1000)
 
-	var ctx context.Context
+	var ctx context.Context = context.Background()
 
 	topicSpec := kafka.TopicSpecification{
 		Topic:             topicName,
@@ -74,16 +76,19 @@ func EnsureTopicExists(bootstrapServers string, topicName string, numPartitions 
 	}
 }
 
-func NewWorker(bootstrapServers string, groupId string, topicName string) Worker {
+func NewJobQueueWorker(bootstrapServers string, groupId string, topicName string, maxPermitedJobProcessing time.Duration) JobQueueWorker {
 	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
-		"bootstrap.servers": bootstrapServers,
-		"group.id":          groupId,
-		"auto.offset.reset": "earliest",
+		"bootstrap.servers":    bootstrapServers,
+		"group.id":             groupId,
+		"auto.offset.reset":    "earliest",
+		"client.id":            appName,
+		"enable.auto.commit":   false,
+		"max.poll.interval.ms": maxPermitedJobProcessing.Milliseconds(),
 	})
 	if err != nil {
 		panic(err)
 	}
-	worker := Worker{client: consumer}
+	worker := JobQueueWorker{client: consumer}
 
 	err = worker.client.Subscribe(topicName, nil)
 	if err != nil {
@@ -93,31 +98,20 @@ func NewWorker(bootstrapServers string, groupId string, topicName string) Worker
 	return worker
 }
 
-func (w *Worker) TryGetNextJob(pollingInterval time.Duration) (Job, error) {
+func (w *JobQueueWorker) TryGetNextJob(pollingInterval time.Duration) (Job, *kafka.Message, error) {
 	mess, err := w.client.ReadMessage(pollingInterval)
 	if err != nil {
 		if err.(kafka.Error).Code() == kafka.ErrTimedOut {
-			return nil, nil
+			return nil, nil, nil
 		} else {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return Job(mess.Value), nil
-}
-
-func (w *Worker) GetNextJob(pollingInterval time.Duration) Job {
-	for {
-		job, err := w.TryGetNextJob(pollingInterval)
-		if err != nil {
-			fmt.Printf("Consumer error: %v (%v)\n", err, job)
-		} else if job != nil {
-			return job
-		}
-	}
+	return Job(mess.Value), mess, nil
 }
 
 // Run the worker loop. The jobs are pushed to the channel "c".
-func (w *Worker) Run(c chan<- Job, stopChannel <-chan int) {
+func (w *JobQueueWorker) Run(c chan<- Job, confirmationChannel <-chan int, stopChannel <-chan int) {
 	for {
 		select {
 		case <-stopChannel:
@@ -125,13 +119,65 @@ func (w *Worker) Run(c chan<- Job, stopChannel <-chan int) {
 			close(c)
 			return
 		default:
-			job, err := w.TryGetNextJob(time.Duration(1e9))
+			job, message, err := w.TryGetNextJob(time.Duration(1e9))
 			if err != nil {
 				fmt.Printf("Consumer error: %v (%v)\n", err, job)
 			}
 			if job != nil {
+				fmt.Printf("Got job key %v (partition %v; %v)\n", message.Key, message.TopicPartition, message.Timestamp)
 				c <- job
+				<-confirmationChannel
+				w.client.CommitMessage(message)
+				fmt.Printf("Comitted processing of %v (partition %v; %v)\n", message.Key, message.TopicPartition, message.Timestamp)
 			}
 		}
 	}
+}
+
+type JobQueueProducer struct {
+	client *kafka.Producer
+	// deliveryChannel chan kafka.Event
+	topicName string
+}
+
+func NewJobQueueProducer(bootstrapServers string, topicName string) JobQueueProducer {
+	producer, err := kafka.NewProducer(&kafka.ConfigMap{
+		"bootstrap.servers": bootstrapServers,
+		"client.id":         appName,
+		"max.request.size":  32 * 1024 * 1024, // 32 Mb
+		"acks":              "all",
+		"retries":           10,
+		"compression.type":  "gzip",
+	})
+	if err != nil {
+		panic(err)
+	}
+	jobProducer := JobQueueProducer{
+		client: producer,
+		// deliveryChannel: make(chan kafka.Event),
+		topicName: topicName,
+	}
+
+	return jobProducer
+}
+
+// Blockes until the job delivery is received from the cluster
+func (p *JobQueueProducer) Enqueue(jobKey string, jobBody []byte) {
+	fmt.Printf("Submitting job \"%s\" (%d bytes)...\n", jobKey, len(jobBody))
+	go p.client.Produce(&kafka.Message{
+		TopicPartition: kafka.TopicPartition{
+			Topic:     &p.topicName,
+			Partition: kafka.PartitionAny,
+		},
+		Value: jobBody,
+	}, nil)
+	for {
+		leftToSend := p.client.Flush(60 * 1000) // 1 min
+		if leftToSend == 0 {
+			break
+		}
+		fmt.Printf("%d messages are still to send...\n", leftToSend)
+	}
+
+	fmt.Printf("job \"%s\"  submitted successfully", jobKey)
 }

@@ -11,7 +11,9 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
+	"sync"
 	"time"
 	"unicode"
 
@@ -41,6 +43,15 @@ func main() {
 		log.Fatalln("SOLR_ADDR env var is not set")
 	}
 
+	simThresholdStr, ok := os.LookupEnv("SIMILARITY_THRESHOLD")
+	if !ok {
+		log.Fatalln("SIMILARITY_THRESHOLD env var is not set")
+	}
+	simThreshold, err := strconv.ParseFloat(simThresholdStr, 64)
+	if err != nil {
+		log.Fatalf("Can't parse %s (SIMILARITY_THRESHOLD env var) as float\n", simThresholdStr)
+	}
+
 	matchedImagesSearchURL := fmt.Sprintf("%s/MatchedImagesSearch", gatewayAddr)
 
 	kafkajobs.EnsureTopicExists(kafkaBootstrapServers, inputTopic, 0, 0, 0)
@@ -67,8 +78,28 @@ func main() {
 		log.Println("Job " + inputJob.Uid + " has " + fmt.Sprint(len(inputJob.Embeddings)) + " embeddings")
 
 		similarRequests := inputJobToImageSearchRequest(&inputJob)
-		if len(similarRequests) > 0 {
-			getSimilarImages(matchedImagesSearchURL, &similarRequests[0])
+
+		similarImageChans := make([]<-chan FoundSimilarImage, len(similarRequests))
+		for i, request := range similarRequests {
+			simImagesChan := make(chan FoundSimilarImage)
+			similarImageChans[i] = simImagesChan
+			go getSimilarIntoChannel(matchedImagesSearchURL, request, simImagesChan)
+		}
+
+		similarImages := make([]FoundSimilarImage, 0)
+		for img := range merge(similarImageChans...) {
+			// fmt.Printf("Gathered similar image: %v\n", img)
+			if img.CosSimilarity >= simThreshold {
+				similarImages = append(similarImages, img)
+			}
+		}
+
+		sort.Slice(similarImages, func(a, b int) bool { return similarImages[a].CosSimilarity > similarImages[b].CosSimilarity })
+
+		fmt.Printf("Got %d similar images\n", len(similarImages))
+
+		for _, img := range similarImages {
+			log.Printf("%v\n", img)
 		}
 		// confirmationChannel <- 1
 		//time.Sleep(10 * time.Second)
@@ -76,6 +107,44 @@ func main() {
 	}
 
 	log.Println("Done")
+}
+
+func merge[T interface{}](cs ...<-chan T) <-chan T {
+	var wg sync.WaitGroup
+	out := make(chan T)
+
+	// Start an output goroutine for each input channel in cs.  output
+	// copies values from c to out until c is closed, then calls wg.Done.
+	output := func(c <-chan T) {
+		for n := range c {
+			out <- n
+		}
+		wg.Done()
+	}
+	wg.Add(len(cs))
+	for _, c := range cs {
+		go output(c)
+	}
+
+	// Start a goroutine to close out once all the output goroutines are
+	// done.  This must start after the wg.Add call.
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+	return out
+}
+
+// to be run as gorutinne. Closes the resChan upon submitting all fetched similar images
+func getSimilarIntoChannel(
+	imageSearchURL string,
+	request SimilarImageRequestJson,
+	resChan chan FoundSimilarImage) {
+	res := getSimilarImages(imageSearchURL, &request)
+	for _, s := range res {
+		resChan <- s
+	}
+	close(resChan)
 }
 
 func decodeEmbedding(encoded *EncodedEmbedding) []float32 {
@@ -119,6 +188,7 @@ func inputJobToImageSearchRequest(job *CardEmbeddingsJob) []SimilarImageRequestJ
 	var result = make([]SimilarImageRequestJson, N)
 	for i, embedding := range job.Embeddings {
 		normalizedEmbedding := normalize(decodeEmbedding(&embedding))
+
 		result[i] = SimilarImageRequestJson{
 			Lat:           job.Location.Lat,
 			Lon:           job.Location.Lon,
@@ -147,7 +217,7 @@ func dotProduct(v1 []float64, v2 []float64) float64 {
 	return result
 }
 
-func getSimilarImages(imageSearchURL string, request *SimilarImageRequestJson) {
+func getSimilarImages(imageSearchURL string, request *SimilarImageRequestJson) []FoundSimilarImage {
 	encodedBytes, err := json.MarshalIndent(*request, "", "   ")
 	if err != nil {
 		log.Fatalf("Failed to marshal json: %v", err)
@@ -185,19 +255,28 @@ func getSimilarImages(imageSearchURL string, request *SimilarImageRequestJson) {
 	if err != nil {
 		log.Fatalf("Failed to parse search result json: %v;\n", err)
 	}
-	fmt.Printf("Found %d docs\n", len(searchRes.Response.Docs))
-	for _, doc := range searchRes.Response.Docs {
+	N := len(searchRes.Response.Docs)
+	fmt.Printf("Found %d docs\n", N)
+	result := make([]FoundSimilarImage, N)
+	for i, doc := range searchRes.Response.Docs {
 		embStr := doc.EmbeddingStr
 		embedding := make([]float64, len(embStr))
-		for i, v := range embStr {
-			embedding[i], err = strconv.ParseFloat(v, 64)
+		for j, v := range embStr {
+			embedding[j], err = strconv.ParseFloat(v, 64)
 			if err != nil {
 				log.Fatalf("failed to parse float string: %s\n", err)
 			}
 		}
 		sim := dotProduct(embedding, request.Features)
 		log.Printf("Doc: %s; similarity: %v\n", doc.Id, sim)
+		result[i] = FoundSimilarImage{DocumentID: doc.Id, CosSimilarity: sim}
 	}
+	return result
+}
+
+type FoundSimilarImage struct {
+	DocumentID    string
+	CosSimilarity float64
 }
 
 type LocationJson struct {

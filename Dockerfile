@@ -3,16 +3,20 @@
 ## Build
 FROM golang:1.19-alpine AS build
 
+# AA kafka lib requires GCC
+RUN apk add build-base
+
 WORKDIR /app
 
 COPY go.mod ./
 COPY go.sum ./
 
-RUN go mod download -tags musl
-
-# this image is to be run as a job or cronjob
+RUN go mod download
 
 COPY *.go ./
+COPY kafkajobs ./kafkajobs
+
+# as "-tags musl - must be specified when building on/for musl-based Linux distros, such as Alpine. Will use the bundled static musl build of librdkafka."
 RUN go build -tags musl -o /cardMatcher
 
 

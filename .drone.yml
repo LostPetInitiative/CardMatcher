@@ -5,10 +5,10 @@ name: default
 
 steps:
 - name: build
-  image: golang:1.19-alpine
-  commands:
-  - go mod download
-  - go build
+  image: plugins/docker
+  settings:
+    target: final
+    dry_run: true
 - name: build & push docker image (main branch)
   image: plugins/docker
   when:

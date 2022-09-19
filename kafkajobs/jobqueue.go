@@ -26,7 +26,7 @@ func tryEnvVarSecifiedConfig(envVar string, defaultVal uint) uint {
 		log.Printf("WARN: \"%s\" env var is not set. Using default value %d\n", envVar, defaultVal)
 		return defaultVal
 	} else {
-		i, err := strconv.ParseUint(s, 0, 64)
+		i, err := strconv.ParseUint(s, 0, 32)
 		if err != nil {
 			log.Panicf("Failed to parse \"%s\" env var as uint. the value failed to parse is \"%s\"\n", envVar, s)
 		}

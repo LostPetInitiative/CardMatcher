@@ -7,6 +7,7 @@ steps:
 - name: build
   image: plugins/docker
   settings:
+    repo: lostpetinitiative/card-matcher
     target: final
     dry_run: true
 - name: build & push docker image (main branch)

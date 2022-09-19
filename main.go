@@ -59,8 +59,9 @@ func main() {
 
 	log.Printf("Initialization complete. Starting main loop")
 
-	//producer := kafkajobs.NewJobQueueProducer(kafkaBootstrapServers, outputTopic)
-	worker := kafkajobs.NewJobQueueWorker(kafkaBootstrapServers, consumerGroup, inputTopic, time.Duration(1e9*60*10))
+	producer := kafkajobs.NewJobQueueProducer(kafkaBootstrapServers, outputTopic)
+	defer producer.Close()
+	worker := kafkajobs.NewJobQueueWorker(kafkaBootstrapServers, consumerGroup, inputTopic, time.Duration(1e9*60*30))
 	defer worker.Close()
 
 	jobChannel := make(chan []byte)
@@ -69,6 +70,7 @@ func main() {
 	go worker.Run(jobChannel, confirmationChannel, stopChannel)
 
 	for {
+		log.Println("Waiting for the next job...")
 		jobBytes := <-jobChannel
 
 		var inputJob CardEmbeddingsJob
@@ -83,7 +85,7 @@ func main() {
 		for i, request := range similarRequests {
 			simImagesChan := make(chan FoundSimilarImage)
 			similarImageChans[i] = simImagesChan
-			go getSimilarIntoChannel(matchedImagesSearchURL, request, simImagesChan)
+			go getSimilarIntoChannel(matchedImagesSearchURL, request, simImagesChan, i)
 		}
 
 		similarImages := make([]FoundSimilarImage, 0)
@@ -101,12 +103,22 @@ func main() {
 		for _, img := range similarImages {
 			log.Printf("%v\n", img)
 		}
-		// confirmationChannel <- 1
-		//time.Sleep(10 * time.Second)
-		return
-	}
+		if len(similarImages) > 0 {
+			outputJob := SimilaritySeachResult{
+				TargetID:        inputJob.Uid,
+				PossibleMatches: similarImages,
+			}
+			outputJobBytes, err := json.MarshalIndent(outputJob, "", " ")
+			if err != nil {
+				log.Fatalf("Could not encode output job json: %v\n", err)
+			}
 
-	log.Println("Done")
+			producer.Enqueue(inputJob.Uid, outputJobBytes)
+		}
+
+		confirmationChannel <- 1
+		//time.Sleep(10 * time.Second)
+	}
 }
 
 func merge[T interface{}](cs ...<-chan T) <-chan T {
@@ -139,8 +151,10 @@ func merge[T interface{}](cs ...<-chan T) <-chan T {
 func getSimilarIntoChannel(
 	imageSearchURL string,
 	request SimilarImageRequestJson,
-	resChan chan FoundSimilarImage) {
-	res := getSimilarImages(imageSearchURL, &request)
+	resChan chan FoundSimilarImage,
+	imNum int,
+) {
+	res := getSimilarImages(imageSearchURL, &request, imNum)
 	for _, s := range res {
 		resChan <- s
 	}
@@ -217,7 +231,7 @@ func dotProduct(v1 []float64, v2 []float64) float64 {
 	return result
 }
 
-func getSimilarImages(imageSearchURL string, request *SimilarImageRequestJson) []FoundSimilarImage {
+func getSimilarImages(imageSearchURL string, request *SimilarImageRequestJson, imNum int) []FoundSimilarImage {
 	encodedBytes, err := json.MarshalIndent(*request, "", "   ")
 	if err != nil {
 		log.Fatalf("Failed to marshal json: %v", err)
@@ -268,15 +282,21 @@ func getSimilarImages(imageSearchURL string, request *SimilarImageRequestJson) [
 			}
 		}
 		sim := dotProduct(embedding, request.Features)
-		log.Printf("Doc: %s; similarity: %v\n", doc.Id, sim)
-		result[i] = FoundSimilarImage{DocumentID: doc.Id, CosSimilarity: sim}
+		// log.Printf("Doc: %s; similarity: %v\n", doc.Id, sim)
+		result[i] = FoundSimilarImage{DocumentID: doc.Id, CosSimilarity: sim, TargetImageNum: imNum}
 	}
 	return result
 }
 
 type FoundSimilarImage struct {
-	DocumentID    string
-	CosSimilarity float64
+	DocumentID     string
+	TargetImageNum int
+	CosSimilarity  float64
+}
+
+type SimilaritySeachResult struct {
+	TargetID        string
+	PossibleMatches []FoundSimilarImage
 }
 
 type LocationJson struct {

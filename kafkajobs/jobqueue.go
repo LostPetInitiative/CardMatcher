@@ -3,6 +3,7 @@ package kafkajobs
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -22,14 +23,14 @@ type JobQueueWorker struct {
 func tryEnvVarSecifiedConfig(envVar string, defaultVal uint) uint {
 	s, ok := os.LookupEnv(envVar)
 	if !ok {
-		fmt.Printf("WARN: \"%s\" env var is not set. Using default value %d\n", envVar, defaultVal)
+		log.Printf("WARN: \"%s\" env var is not set. Using default value %d\n", envVar, defaultVal)
 		return defaultVal
 	} else {
 		i, err := strconv.ParseUint(s, 0, 64)
 		if err != nil {
-			panic(fmt.Sprintf("Failed to parse \"%s\" env var as uint. the value failed to parse is \"%s\"\n", envVar, s))
+			log.Panicf("Failed to parse \"%s\" env var as uint. the value failed to parse is \"%s\"\n", envVar, s)
 		}
-		fmt.Printf("INFO: Using value %d as defined in %s env var\n", i, envVar)
+		log.Printf("INFO: Using value %d as defined in %s env var\n", i, envVar)
 		return uint(i)
 	}
 }
@@ -70,9 +71,9 @@ func EnsureTopicExists(bootstrapServers string, topicName string, numPartitions 
 
 	res, err := adminClient.CreateTopics(ctx, []kafka.TopicSpecification{topicSpec})
 	if err != nil {
-		fmt.Printf("INFO: topic \"%s\" already exists\n", topicName)
+		log.Printf("INFO: topic \"%s\" already exists\n", topicName)
 	} else {
-		fmt.Printf("INFO: topic \"%s\" creation reault: %v\n", topicName, res[0])
+		log.Printf("INFO: topic \"%s\" creation reault: %v\n", topicName, res[0])
 	}
 }
 
@@ -121,22 +122,22 @@ func (w *JobQueueWorker) Run(c chan<- Job, confirmationChannel <-chan int, stopC
 		default:
 			job, message, err := w.TryGetNextJob(time.Duration(1e9))
 			if err != nil {
-				fmt.Printf("Consumer error: %v (%v)\n", err, job)
+				log.Printf("Consumer error: %v (%v)\n", err, job)
 			}
 			if job != nil {
 				keyStr := string(message.Key[:])
-				fmt.Printf("Got job key %v (partition %v; %v)\n", keyStr, message.TopicPartition, message.Timestamp)
+				log.Printf("Got job key %v (partition %v; %v)\n", keyStr, message.TopicPartition, message.Timestamp)
 				c <- job
 				<-confirmationChannel
 				w.client.CommitMessage(message)
-				fmt.Printf("Comitted processing of %v (partition %v; %v)\n", keyStr, message.TopicPartition, message.Timestamp)
+				log.Printf("Comitted processing of %v (partition %v; %v)\n", keyStr, message.TopicPartition, message.Timestamp)
 			}
 		}
 	}
 }
 
 func (w *JobQueueWorker) Close() {
-	fmt.Println("Closing worker")
+	log.Println("Closing worker")
 	w.client.Close()
 }
 
@@ -150,10 +151,11 @@ func NewJobQueueProducer(bootstrapServers string, topicName string) JobQueueProd
 	producer, err := kafka.NewProducer(&kafka.ConfigMap{
 		"bootstrap.servers": bootstrapServers,
 		"client.id":         appName,
-		"max.request.size":  32 * 1024 * 1024, // 32 Mb
-		"acks":              "all",
-		"retries":           10,
-		"compression.type":  "gzip",
+		// "batch.size":        1,
+		//"max.request.size":  32 * 1024 * 1024, // 32 Mb
+		"acks":             "all",
+		"retries":          10,
+		"compression.type": "gzip",
 	})
 	if err != nil {
 		panic(err)
@@ -169,26 +171,34 @@ func NewJobQueueProducer(bootstrapServers string, topicName string) JobQueueProd
 
 // Blockes until the job delivery is received from the cluster
 func (p *JobQueueProducer) Enqueue(jobKey string, jobBody []byte) {
-	fmt.Printf("Submitting job \"%s\" (%d bytes)...\n", jobKey, len(jobBody))
-	go p.client.Produce(&kafka.Message{
+	log.Printf("Submitting job \"%s\" (%d bytes)...\n", jobKey, len(jobBody))
+	ch := make(chan kafka.Event)
+	p.client.Produce(&kafka.Message{
 		TopicPartition: kafka.TopicPartition{
 			Topic:     &p.topicName,
 			Partition: kafka.PartitionAny,
 		},
+		Key:   []byte(jobKey),
 		Value: jobBody,
-	}, nil)
+	}, ch)
+	handleConfirmation := func() {
+		e := <-ch
+		log.Printf("Submitted job \"%s\": %v\n", jobKey, e)
+	}
+	go handleConfirmation()
+
 	for {
-		leftToSend := p.client.Flush(60 * 1000) // 1 min
+		leftToSend := p.client.Flush(300 * 1000) // 5 min
 		if leftToSend == 0 {
 			break
 		}
-		fmt.Printf("%d messages are still to send...\n", leftToSend)
+		log.Printf("%d messages are still to send...\n", leftToSend)
 	}
 
-	fmt.Printf("job \"%s\"  submitted successfully", jobKey)
+	log.Printf("job \"%s\"  submitted successfully\n", jobKey)
 }
 
 func (p *JobQueueProducer) Close() {
-	fmt.Println("Closing producer")
+	log.Println("Closing producer")
 	p.client.Close()
 }

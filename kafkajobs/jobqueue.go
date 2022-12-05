@@ -187,12 +187,19 @@ func (p *JobQueueProducer) Enqueue(jobKey string, jobBody []byte) {
 	}
 	go handleConfirmation()
 
+	var retries int = 0
 	for {
+		retries += 1
 		leftToSend := p.client.Flush(300 * 1000) // 5 min
 		if leftToSend == 0 {
 			break
 		}
 		log.Printf("%d messages are still to send...\n", leftToSend)
+		if retries == 50 {
+			log.Printf("Failed to send after %d retries ", retries)
+			p.client.Close()
+			log.Fatal("stopping process relaying on k8s to restart")
+		}
 	}
 
 	log.Printf("job \"%s\"  submitted successfully\n", jobKey)

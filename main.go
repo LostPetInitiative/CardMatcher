@@ -104,7 +104,7 @@ func main() {
 			log.Printf("%v\n", img)
 		}
 		if len(similarImages) > 0 {
-			outputJob := SimilaritySeachResult{
+			outputJob := SimilaritySearchResult{
 				TargetID:        inputJob.Uid,
 				PossibleMatches: similarImages,
 			}
@@ -294,7 +294,7 @@ type FoundSimilarImage struct {
 	CosSimilarity  float64
 }
 
-type SimilaritySeachResult struct {
+type SimilaritySearchResult struct {
 	TargetID        string
 	PossibleMatches []FoundSimilarImage
 }

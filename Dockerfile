@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 ## Build
-FROM golang:1.19-alpine AS build
+FROM golang:1.22-alpine AS build
 
 # AA kafka lib requires GCC
 RUN apk add build-base

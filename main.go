@@ -248,7 +248,7 @@ func getSimilarImages(imageSearchURL string, request *SimilarImageRequestJson, i
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 
-	log.Printf("Qeuring for similarities...\n")
+	log.Printf("Querying for similarities...\n")
 	res, postErr := httpClient.Do(req)
 	if postErr != nil {
 		log.Fatalf("Failed to get similar images: %v", postErr)
@@ -257,11 +257,15 @@ func getSimilarImages(imageSearchURL string, request *SimilarImageRequestJson, i
 	if res.Body != nil {
 		defer res.Body.Close()
 	}
-	log.Printf("Got similarity serach result: %d\n", res.StatusCode)
+	log.Printf("Got similarity search result: %d\n", res.StatusCode)
 
 	body, readErr := io.ReadAll(res.Body)
 	if readErr != nil {
 		log.Fatalf("Failed to read the HTTP body response:%v\n", readErr)
+	}
+
+	if res.StatusCode/100 != 2 {
+		log.Fatalf("Failed to get successful search reply, http status code: %d", res.StatusCode)
 	}
 
 	var searchRes SimilarImageSearchResultJson
@@ -273,15 +277,7 @@ func getSimilarImages(imageSearchURL string, request *SimilarImageRequestJson, i
 	fmt.Printf("Found %d docs\n", N)
 	result := make([]FoundSimilarImage, N)
 	for i, doc := range searchRes.Response.Docs {
-		embStr := doc.EmbeddingStr
-		embedding := make([]float64, len(embStr))
-		for j, v := range embStr {
-			embedding[j], err = strconv.ParseFloat(v, 64)
-			if err != nil {
-				log.Fatalf("failed to parse float string: %s\n", err)
-			}
-		}
-		sim := dotProduct(embedding, request.Features)
+		sim := dotProduct(doc.Embedding, request.Features)
 		// log.Printf("Doc: %s; similarity: %v\n", doc.Id, sim)
 		result[i] = FoundSimilarImage{DocumentID: doc.Id, CosSimilarity: sim, TargetImageNum: imNum}
 	}
@@ -331,8 +327,8 @@ type SimilarImageRequestJson struct {
 }
 
 type SimilarImageDocsJson struct {
-	Id           string   `json:"id"`
-	EmbeddingStr []string `json:"calvin_zhirui_embedding"`
+	Id        string    `json:"id"`
+	Embedding []float64 `json:"calvin_zhirui_embedding"`
 }
 
 type SimilarImageResponseJson struct {
